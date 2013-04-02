@@ -1,0 +1,2 @@
+pylibpcap==0.6.4
+python-pytun==2.1
