@@ -183,6 +183,7 @@ def recv_capture_opts(sock):
 
 
 def send_packet(packet_len, packet_data, sock):
+
     data_fmt = STR_FMT % packet_len
 
     # sending data len packed on a short int
@@ -197,4 +198,14 @@ def send_packet(packet_len, packet_data, sock):
 
 
 def recv_packet(sock):
-    return recv_string(sock)
+    # reading and unpacking length of the packet
+    pkt_len = _recvall(calcsize(LEN_FMT), sock)
+    pkt_len = unpack(LEN_FMT, pkt_len)[0]
+
+    # reading packed-data
+    packed_data = _recvall(pkt_len, sock)
+
+    # unpacking data
+    data_fmt = STR_FMT % pkt_len
+
+    return pkt_len, unpack(data_fmt, packed_data)[0]

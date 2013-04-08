@@ -117,21 +117,22 @@ and press any key to continue...')
                 #       to exchange execution status
                 while True:
 
-                    packet_data = proto.recv_packet(client_socket)
+                    pktlen, pkt = proto.recv_packet(client_socket)
 
-                    log.debug('Packet received! %d bytes, [%s]'
-                              % (len(packet_data), packet_data))
+                    log.debug('%d bytes packet sniffed from %s'
+                              % (pktlen, args.remote))
 
-                    tap.write(packet_data)
+                    tap.write(pkt)
 
-                    log.debug('Packet wrote! %d bytes, [%s]'
-                              % (len(packet_data), packet_data))
+                    log.debug('%d bytes packet wrote into %s'
+                              % (pktlen, args.local))
             else:
                 log.error('Something weird happened!')
 
         log.info('shutting down connection')
         client_socket.shutdown(socket.SHUT_RD)
     except:
+        client_socket.shutdown(socket.SHUT_RD)
         raise
     finally:
         client_socket.close()

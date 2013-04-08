@@ -17,6 +17,7 @@ import argparse
 import multiprocessing
 from multiprocessing.reduction import reduce_handle
 from multiprocessing.reduction import rebuild_handle
+from datetime import datetime
 from binascii import hexlify
 
 from rifsniff import proto, utils
@@ -90,8 +91,10 @@ def serve_client(pipe):
             while True:
                 (pktlen, data, timestamp) = p.next()
 
-                log.debug('Sniffed packet of len %d, in time %s: [%s]' %
-                          (pktlen, str(timestamp), str(data)))
+                dt = datetime.fromtimestamp(timestamp)
+
+                log.debug('[%s] %d bytes packet sniffed from %s' %
+                          (dt.ctime(), pktlen, dev))
 
                 sentbytes = proto.send_packet(pktlen, data, client_socket)
                 if sentbytes != pktlen:
