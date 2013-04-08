@@ -14,10 +14,8 @@ import pytun
 import socket
 import logging
 import argparse
-import subprocess  #  TODO: remove if tap.up() works
 from binascii import hexlify
 
-#import rifsniff_proto as proto
 from rifsniff import proto, utils
 
 
@@ -100,16 +98,6 @@ and press any key to continue...')
             tap.mtu = args.snaplen  # FIXME: Is really necessary?
 
             log.debug('Tap MTU before activation is %d' % tap.mtu)
-
-#            try:
-#                subprocess.check_call(['sudo', 'ifconfig', args.local, 'up'])
-#            except subprocess.CalledProcessError as cpe:
-#                log.warning('ifconfig failed with code %d' % (cpe.returncode))
-#                log.warning('Unable to activate the tap interface. Try running \
-#`ifconfig %s up` manually if the device appears created but not active.' % args.local)
-
-            #tap.up()
-            log.debug('Tap MTU after activation is %d' % tap.mtu)
 
             log.info(args)
             proto.send_cmd(proto.CMD_SNIFF, client_socket)

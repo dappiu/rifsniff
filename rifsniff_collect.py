@@ -19,7 +19,6 @@ from multiprocessing.reduction import reduce_handle
 from multiprocessing.reduction import rebuild_handle
 from binascii import hexlify
 
-#import rifsniff_proto as proto
 from rifsniff import proto, utils
 
 
