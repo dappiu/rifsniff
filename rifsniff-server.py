@@ -12,20 +12,29 @@ import pdb  # XXX: Remove
 import sys
 import pcap
 import socket
+import signal
 import logging
 import argparse
 import multiprocessing
 from multiprocessing.reduction import reduce_handle
-from multiprocessing.reduction import rebuild_handle
-from datetime import datetime
-from binascii import hexlify
 
-from rifsniff import proto, utils
+
+from rifsniff import utils
+from rifsniff.server import RemoteInterfaceSniffer
 
 
 VERSION = '0.1'
 
 log = logging.getLogger()
+
+
+PROCLIST = []
+
+
+def sighandler(signum, frame):
+    log.info('RECEIVED SIGNAL: %d' % signum)
+    for proc in PROCLIST:
+        proc.terminate()
 
 
 def configure_logger(log):
@@ -38,78 +47,6 @@ def configure_logger(log):
     stream.setLevel(logging.DEBUG)
 
     log.addHandler(stream)
-
-
-def serve_client(pipe):
-
-    client_handle = pipe.recv()
-
-    sockfd = rebuild_handle(client_handle)
-    client_socket = socket.fromfd(sockfd, socket.AF_INET, socket.SOCK_STREAM)
-
-    client_info = {'ip': client_socket.getpeername()[0],
-                   'port': client_socket.getpeername()[1]}
-
-    # Adding connection information (peer address:port) to logging records
-    log = logging.LoggerAdapter(logging.getLogger(), client_info)
-    new_log_fmt = logging.Formatter('[%(process)d %(levelname)s] \
-<%(ip)s:%(port)s> %(message)s')
-    logging.getLogger().handlers[0].setFormatter(new_log_fmt)
-
-    try:
-        if proto.check_protocol_version(client_socket):
-            log.info('protocol versions match [%s]' %
-                     (hexlify(proto.PROTOVERSION)))
-
-        cmd = proto.recv_cmd(client_socket)
-
-        if cmd == proto.CMD_LIST:
-            log.info('client requested list of interfaces available for capture')
-
-            devs = pcap.findalldevs()
-            sentbytes = proto.send_pyobj(devs, client_socket)
-            log.debug('interface list sent: %d device[s], %d bytes'
-                      % (len(devs), sentbytes))
-
-        elif cmd == proto.CMD_SNIFF:
-            log.info('client wants to sniff packets on a device')
-            log.debug('reading capture session options')
-
-            dev, snaplen, bpf = proto.recv_capture_opts(client_socket)
-
-            log.info('dev: <%s>, snaplen: <%d>, bpf: <%s>' % (dev, int(snaplen), bpf))
-
-            p = pcap.pcapObject()
-            net, mask = pcap.lookupnet(dev)
-            log.info('pcap lookupnet reported <%s>:<%s>' % (pcap.ntoa(net),
-                                                            pcap.ntoa(mask)))
-
-            sentbytes = proto.send_cmd(proto.RESP_OK, client_socket)
-            p.open_live(dev, 1600, 0, 100)
-#            p.setfilter(string.join(sys.argv[2:],' '), 0, 0)
-
-            while True:
-                (pktlen, data, timestamp) = p.next()
-
-                dt = datetime.fromtimestamp(timestamp)
-
-                log.debug('[%s] %d bytes packet sniffed from %s' %
-                          (dt.ctime(), pktlen, dev))
-
-                sentbytes = proto.send_packet(pktlen, data, client_socket)
-                if sentbytes != pktlen:
-                    log.warning('sentbytes not equals pktlen')
-
-        else:
-            log.error('received an unknown command: %s' % cmd)
-            raise RuntimeError('client sent an unknown command byte: %s' % cmd)
-
-    finally:
-        log.info('shutting down connection')
-        client_socket.shutdown(socket.SHUT_RDWR)
-        client_socket.close()
-
-    return 0
 
 
 def main():
@@ -133,6 +70,8 @@ def main():
 
     args = parser.parse_args()
 
+    signal.signal(signal.SIGINT, sighandler)
+
     if args.list_compact or args.list:
         try:
             devs = pcap.findalldevs()
@@ -142,8 +81,7 @@ def main():
                 log.warn('Try running the program with higher permissions (e.g.: sudo)')
             elif args.list_compact:
                 log.info('Listing names of devices available for capture')
-                for dev in devs:
-                    log.info(dev[0])
+                utils.print_device_list(devs)
             else:
                 log.info('Listing devices available for capture')
                 for dev in devs:
@@ -165,7 +103,9 @@ def main():
 
             pipe_r, pipe_w = multiprocessing.Pipe(duplex=False)
 
-            proc = multiprocessing.Process(target=serve_client, args=(pipe_r,))
+            #proc = multiprocessing.Process(target=serve_client, args=(pipe_r,))
+            proc = RemoteInterfaceSniffer(pipe_r)
+            PROCLIST.append(proc)
             proc.start()
 
             client_handle = reduce_handle(client.fileno())

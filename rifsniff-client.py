@@ -16,8 +16,9 @@ import logging
 import argparse
 from binascii import hexlify
 
-from rifsniff import proto, utils
-
+from rifsniff import utils
+from rifsniff.proto import RIfSniffClientSocket, \
+    PROTOVERSION, CMD_LIST, CMD_SNIFF, RESP_OK, RESP_KO
 
 VERSION = '0.1'
 
@@ -50,66 +51,73 @@ def main():
     parser.add_argument('-p', '--port', type=int, default=6384,
                         help='port where the collector is listening')
     parser.add_argument('-L', '--list', action='store_true',
-                        help='Lists available remote interfaces (if any) and exits')
+                        help=('Lists available remote interfaces (if any) '
+                        'and exits'))
     parser.add_argument('-r', '--remote', type=str,
                         help='[mandatory] Remote interface name')
     parser.add_argument('-l', '--local', type=str, default='tap0',
-                        help='[optional] Name of the local virtual interface (default: tap0)')
+                        help=('Name of the local virtual interface '
+                        '(default: tap0)'))
     parser.add_argument('-f', '--filter', type=str, default='',
-                        help='BPF Filter to attach to remote interface (default: none)')
+                        help=('BPF Filter to attach to remote interface '
+                        '(default: none)'))
     parser.add_argument('-s', '--snaplen', type=int, default=1500,
                         help='Truncate packet at length (default: 1500)')
+    parser.add_argument('-P', '--promisc', type=bool, default=False,
+                        help='Put interface in promiscuos mode')
+    parser.add_argument('-m', '--monitor', type=bool, default=False,
+                        help='Put interface in monitor mode')
     args = parser.parse_args()
 
     if not args.list and not args.remote:
-        log.error('remote interface name missing. use --remote switch to select\n')
+        log.error('Remote interface name missing. Use --remote to select\n')
         parser.print_usage()
         sys.exit(1)
 
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client_socket.settimeout(10.0)
+    sock = RIfSniffClientSocket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(10.0)
 
     server_addr = (args.address, args.port)
-    client_socket.connect(server_addr)
+    sock.connect(server_addr)
 
     log.info('connection established. sending request...')
 
     try:
-        if proto.check_protocol_version(client_socket):
+        if sock.check_proto_version():
             log.info('protocol versions match [%s]' %
-                     (hexlify(proto.PROTOVERSION)))
+                     (hexlify(PROTOVERSION)))
 
         if args.list:
 
-            proto.send_cmd(proto.CMD_LIST, client_socket)
+            sock.send_cmd(CMD_LIST)
 
-            devs = proto.recv_pyobj(client_socket)
+            devs = sock.recv_pyobj()
             for dev in devs:
                 utils.print_device_description(dev)
         else:
 
             tap = pytun.TunTapDevice(name=args.local,
-                                     flags=pytun.IFF_TAP|pytun.IFF_NO_PI)
+                                     flags=pytun.IFF_TAP | pytun.IFF_NO_PI)
             tap.up()
-            log.info('Tap device created. Attach your sniffer, if you want, \
-and press any key to continue...')
+            log.info('Tap device created. Attach your sniffer, if you want, '
+                     'and press any key to continue...')
             raw_input()
 
-            tap.mtu = args.snaplen  # FIXME: Is really necessary?
+            tap.mtu = args.snaplen
 
             log.debug('Tap MTU before activation is %d' % tap.mtu)
 
             log.info(args)
-            proto.send_cmd(proto.CMD_SNIFF, client_socket)
-            proto.send_capture_opts(args.remote, args.snaplen, args.filter,
-                                    client_socket)
+            sock.send_cmd(CMD_SNIFF)
+            sock.send_capture_opts(args.remote, args.snaplen, args.filter,
+                                   args.promisc, args.monitor)
 
-            resp = proto.recv_cmd(client_socket)
-            if resp == proto.RESP_KO:
+            resp, payload = sock.recv_cmd()
+            if resp == RESP_KO:
 
                 log.error('Remote error')
                 # receive error description and log it...
-            elif resp == proto.RESP_OK:
+            elif resp == RESP_OK:
 
                 log.info('Everything Ok. Preparing to receive packets from remote')
 
@@ -117,7 +125,7 @@ and press any key to continue...')
                 #       to exchange execution status
                 while True:
 
-                    pktlen, pkt = proto.recv_packet(client_socket)
+                    pktlen, pkt = sock.recv_packet()
 
                     log.debug('%d bytes packet sniffed from %s'
                               % (pktlen, args.remote))
@@ -130,12 +138,12 @@ and press any key to continue...')
                 log.error('Something weird happened!')
 
         log.info('shutting down connection')
-        client_socket.shutdown(socket.SHUT_RD)
+        sock.shutdown(socket.SHUT_RD)
     except:
-        client_socket.shutdown(socket.SHUT_RD)
+        sock.shutdown(socket.SHUT_RD)
         raise
     finally:
-        client_socket.close()
+        sock.close()
 
 
 if __name__ == '__main__':

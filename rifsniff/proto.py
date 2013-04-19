@@ -9,6 +9,8 @@ preceded by a fixed size short integer indicating the size.
 @author: dappiu@gmail.com
 
 """
+import socket
+
 from struct import calcsize, pack, unpack
 from cPickle import dumps, loads
 from binascii import hexlify
@@ -25,187 +27,213 @@ CMD_SNIFF = 'S'
 CMD_LIST = 'L'
 RESP_OK = 'O'
 RESP_KO = 'K'
+RESP_KO_PAYLOAD = 'P'
+RESP_WARN_PAYLOAD = 'W'
 
 
-def _recvall(nbytes, sock):
-    """Ensures to receive the required amount of data from socket buffers"""
+class RIfSniffSocket(socket.socket):
 
-    buf = ''
+    def __init__(self, family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0,
+                 _sock=None):
+        super(RIfSniffSocket, self).__init__(family, type, proto, _sock)
 
-    while len(buf) < nbytes:
-        data = sock.recv(nbytes - len(buf))
-        if data == '':
-            raise RuntimeError('socket connection broken')
-        buf = buf + data
+    def _recvall(self, nbytes):
+        """Ensures to receive the required amount of data from socket buffers"""
 
-    return buf
+        buf = ''
 
+        while len(buf) < nbytes:
+            data = self.recv(nbytes - len(buf))
+            if data == '':
+                raise RuntimeError('socket connection broken')
+            buf = buf + data
 
-def _sendall(msg, sock):
-    """Ensures that all data are delivered to socket buffers"""
+        return buf
 
-    totalsent = 0
+    def _sendall(self, msg):
+        """Ensures that all data are delivered to socket buffers"""
 
-    while totalsent < len(msg):
-        sent = sock.send(msg[totalsent:])
-        if sent == 0:
-            raise RuntimeError('socket connection broken')
-        totalsent = totalsent + sent
+        totalsent = 0
 
-    return totalsent
+        while totalsent < len(msg):
+            sent = self.send(msg[totalsent:])
+            if sent == 0:
+                raise RuntimeError('socket connection broken')
+            totalsent = totalsent + sent
 
+        return totalsent
 
-def check_protocol_version(sock):
-    """Sends local and reads remote protocol versions for comparison"""
+    def check_proto_version(self):
+        """Sends local and reads remote protocol versions for comparison"""
 
-    packed_len = pack(LEN_FMT, calcsize(PROTOVER_FMT))
-    sentbytes = _sendall(packed_len, sock)
-    assert sentbytes == calcsize(LEN_FMT)
+        packed_len = pack(LEN_FMT, calcsize(PROTOVER_FMT))
+        sentbytes = self._sendall(packed_len)
+        assert sentbytes == calcsize(LEN_FMT)
 
-    sentbytes = _sendall(PROTOVERSION, sock)
-    assert sentbytes == calcsize(PROTOVER_FMT)
+        sentbytes = self._sendall(PROTOVERSION)
+        assert sentbytes == calcsize(PROTOVER_FMT)
 
-    protover_length = _recvall(calcsize(LEN_FMT), sock)
-    protover_length = unpack(LEN_FMT, protover_length)[0]
-    assert protover_length == calcsize(PROTOVER_FMT)
+        protover_length = self._recvall(calcsize(LEN_FMT))
+        protover_length = unpack(LEN_FMT, protover_length)[0]
+        assert protover_length == calcsize(PROTOVER_FMT)
 
-    protoversion = _recvall(protover_length, sock)
-    if PROTOVERSION != protoversion:
-        raise RuntimeError('protocol version mismatch: local %s != %s remote' %
-                           (hexlify(PROTOVERSION), hexlify(protoversion)))
+        protoversion = self._recvall(protover_length)
+        if PROTOVERSION != protoversion:
+            raise RuntimeError('protocol version mismatch: local %s != %s remote' %
+                               (hexlify(PROTOVERSION), hexlify(protoversion)))
 
-    return True
+        return True
 
+    def send_cmd(self, cmd, payload=None):
+        """Encode and send a CMD option to the socket"""
 
-def send_cmd(cmd, sock):
-    """Encode and send a CMD option to the socket"""
+        sentbytes = self._sendall(pack(CMD_FMT, cmd))
+        if payload:
+            self.send_string(payload)
 
-    sentbytes = _sendall(pack(CMD_FMT, cmd), sock)
+        return sentbytes
 
-    return sentbytes
+    def recv_cmd(self):
+        """Reads a binary encoded CMD option from the socket"""
 
+        cmd = self._recvall(calcsize(CMD_FMT))
 
-def recv_cmd(sock):
-    """Reads a binary encoded CMD option from the socket"""
+        payload = None
 
-    cmd = _recvall(calcsize(CMD_FMT), sock)
+        if cmd in (RESP_KO_PAYLOAD, RESP_WARN_PAYLOAD):
+            payload = self.recv_string()
 
-    return unpack(CMD_FMT, cmd)[0]
+        return unpack(CMD_FMT, cmd)[0], payload
 
+    def send_int(self, integer):
+        """Encode an integer in binary form and sends it to the socket"""
 
-def send_int(integer, sock):
-    """Encode an integer in binary form and sends it to the socket"""
-    # packing and sending integer
-    packed_int = pack(INT_FMT, integer)
-    sentbytes = _sendall(packed_int, sock)
+        # packing and sending integer
+        packed_int = pack(INT_FMT, integer)
+        sentbytes = self._sendall(packed_int)
 
-    return sentbytes
+        return sentbytes
 
+    def recv_int(self):
+        """Receive a fixed size binary integer from the socket"""
 
-def recv_int(sock):
-    """Receive a fixed size binary integer from the socket"""
+        # reading integer bytes
+        int_data = self._recvall(calcsize(INT_FMT))
 
-    # reading integer bytes
-    int_data = _recvall(calcsize(INT_FMT), sock)
+        return unpack(INT_FMT, int_data)[0]
 
-    return unpack(INT_FMT, int_data)[0]
+    def send_string(self, data):
+        """Send string length and string data to the socket in binary coding"""
 
+        data_fmt = STR_FMT % len(data)
 
-def send_string(data, sock):
-    """Send string length and string data to the socket in binary coding"""
+        # sending data len packed on a short int
+        packed_len = pack(LEN_FMT, calcsize(data_fmt))
+        sentbytes = self._sendall(packed_len)
 
-    data_fmt = STR_FMT % len(data)
+        # sending binary-packed data
+        packed_data = pack(data_fmt, data)
+        sentbytes = self._sendall(packed_data)
 
-    # sending data len packed on a short int
-    packed_len = pack(LEN_FMT, calcsize(data_fmt))
-    sentbytes = _sendall(packed_len, sock)
+        return sentbytes
 
-    # sending data binary-packed
-    packed_data = pack(data_fmt, data)
-    sentbytes = _sendall(packed_data, sock)
+    def recv_string(self):
+        """Read consequently a binary-packed string length and string data
+        from the socket"""
 
-    return sentbytes
+        # reading and unpacking length of the data that will follow
+        data_len = self._recvall(calcsize(LEN_FMT))
+        data_len = unpack(LEN_FMT, data_len)[0]
 
+        # reading packed-data
+        packed_data = self._recvall(data_len)
 
-def recv_string(sock):
-    """Read consequently a binary-packed string length and string data
-    from the socket"""
+        # unpacking data
+        data_fmt = STR_FMT % data_len
 
-    # reading and unpacking length of the data that will follow
-    data_len = _recvall(calcsize(LEN_FMT), sock)
-    data_len = unpack(LEN_FMT, data_len)[0]
+        return unpack(data_fmt, packed_data)[0]
 
-    # reading packed-data
-    packed_data = _recvall(data_len, sock)
+    def send_pyobj(self, obj):
+        """Encode a Python obj with pickle and sends it as a string to the socket"""
 
-    # unpacking data
-    data_fmt = STR_FMT % data_len
+        pickled = dumps(obj, protocol=2)
 
-    return unpack(data_fmt, packed_data)[0]
+        return self.send_string(pickled)
 
+    def recv_pyobj(self):
+        """Reads a pickled obj from socket and returns it after de-pickling"""
 
-def send_pyobj(obj, sock):
-    """Encode a Python obj with pickle and sends it as a string to the socket"""
+        pickled = self.recv_string()
 
-    pickled = dumps(obj, protocol=2)
+        return loads(pickled)
 
-    return send_string(pickled, sock)
 
+class RIfSniffServerSocket(RIfSniffSocket):
 
-def recv_pyobj(sock):
-    """Reads a pickled obj from socket and returns it after de-pickling"""
+    def __init__(self, fd):
 
-    pickled = recv_string(sock)
+        sock = socket.fromfd(fd, socket.AF_INET, socket.SOCK_STREAM)
+        super(RIfSniffServerSocket, self).__init__(_sock=sock)
 
-    return loads(pickled)
+    def recv_capture_opts(self):
 
+        dev = self.recv_string()
 
-def send_capture_opts(dev, snaplen, bpf, sock):
+        snaplen = self.recv_int()
 
-    sentbytes = send_string(dev, sock)
+        bpf = self.recv_string()
 
-    sentbytes = sentbytes + send_int(snaplen, sock)
+        promisc = bool(self.recv_int())
 
-    sentbytes = sentbytes + send_string(bpf, sock)
+        monitor = bool(self.recv_int())
 
-    return sentbytes
+        return dev, snaplen, bpf, promisc, monitor
 
+    def send_packet(self, packet_len, packet_data):
 
-def recv_capture_opts(sock):
+        data_fmt = STR_FMT % packet_len
 
-    dev = recv_string(sock)
+        # sending data len packed on a short int
+        packed_len = pack(LEN_FMT, calcsize(data_fmt))
+        sentbytes = self._sendall(packed_len)
 
-    snaplen = recv_int(sock)
+        # sending data binary-packed
+        packed_data = pack(data_fmt, packet_data)
+        sentbytes = self._sendall(packed_data)
 
-    bpf = recv_string(sock)
+        return sentbytes
 
-    return dev, snaplen, bpf
 
+class RIfSniffClientSocket(RIfSniffSocket):
 
-def send_packet(packet_len, packet_data, sock):
+    def __init__(self, family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0,
+                 _sock=None):
 
-    data_fmt = STR_FMT % packet_len
+        super(RIfSniffClientSocket, self).__init__(family, type, proto, _sock)
 
-    # sending data len packed on a short int
-    packed_len = pack(LEN_FMT, calcsize(data_fmt))
-    sentbytes = _sendall(packed_len, sock)
+    def send_capture_opts(self, dev, snaplen, bpf, promisc, monitor):
 
-    # sending data binary-packed
-    packed_data = pack(data_fmt, packet_data)
-    sentbytes = _sendall(packed_data, sock)
+        sentbytes = self.send_string(dev)
 
-    return sentbytes
+        sentbytes = sentbytes + self.send_int(snaplen)
 
+        sentbytes = sentbytes + self.send_string(bpf)
 
-def recv_packet(sock):
-    # reading and unpacking length of the packet
-    pkt_len = _recvall(calcsize(LEN_FMT), sock)
-    pkt_len = unpack(LEN_FMT, pkt_len)[0]
+        sentbytes = sentbytes + self.send_int(int(promisc))
 
-    # reading packed-data
-    packed_data = _recvall(pkt_len, sock)
+        sentbytes = sentbytes + self.send_int(int(monitor))
 
-    # unpacking data
-    data_fmt = STR_FMT % pkt_len
+        return sentbytes
 
-    return pkt_len, unpack(data_fmt, packed_data)[0]
+    def recv_packet(self, sock):
+        # reading and unpacking length of the packet
+        pkt_len = self._recvall(calcsize(LEN_FMT))
+        pkt_len = unpack(LEN_FMT, pkt_len)[0]
+
+        # reading packed-data
+        packed_data = self._recvall(pkt_len)
+
+        # unpacking data
+        data_fmt = STR_FMT % pkt_len
+
+        return pkt_len, unpack(data_fmt, packed_data)[0]
